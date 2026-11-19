@@ -1,0 +1,2 @@
+# Preserve source and fixture bytes from the pinned Git snapshots.
+vendor/** -text

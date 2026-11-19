@@ -1,0 +1,10 @@
+{
+  "sigint": {
+    "repository": "https://github.com/paoloo/sigint",
+    "commit": "872bfae5e4a16b57d310142a273687ff6b78e297"
+  },
+  "sigint-rfi": {
+    "repository": "https://github.com/paoloo/sigint-rfi",
+    "commit": "56fdfe8b3f3d6f95d050d686fd2dd425a646823a"
+  }
+}
