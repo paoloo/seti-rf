@@ -65,3 +65,10 @@ Review the snapshots and the upstream dependency and package-data
 settings when refreshing. The bundle includes legacy code and demo
 captures from the pinned sources. Confirm the applicable redistribution
 terms before changing repository visibility.
+
+## License and citation
+
+Project code is released under the [MIT License](LICENSE). Third-party
+materials remain subject to their applicable terms.
+
+If you use this software in research, cite it using [CITATION.cff](CITATION.cff).

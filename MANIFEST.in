@@ -1,3 +1,4 @@
+include CITATION.cff
 include vendor/upstream.json
 include vendor/frb_retention.py
 include tools/refresh.py
