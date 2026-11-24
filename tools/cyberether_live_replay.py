@@ -1,12 +1,11 @@
 """Replay recorded GPS IQ and ATA power through a paced CyberEther detector."""
 import argparse
+import inspect
 import io
 import json
-import os
 from pathlib import Path
 import struct
-import sys
-from concurrent.futures import ThreadPoolExecutor
+from textwrap import indent
 
 import numpy as np
 from scipy.ndimage import uniform_filter1d
@@ -21,7 +20,6 @@ GPS_BYTES = GPS_RATE // 100 * 4
 PACKET = struct.Struct("<IIdd")
 PACKET_BYTES = PACKET.size + ROWS * CHANNELS * 2 + GPS_BYTES
 BATCH = PACKET_BYTES // 8
-PIXELS = HEIGHT * WIDTH * 3
 DM = 219.81
 
 
@@ -62,7 +60,7 @@ class Detector:
                              offset=PACKET.size).reshape(count, CHANNELS)
         if start == 0:
             iq = np.frombuffer(packet, dtype="<i2", offset=PACKET.size + ROWS * CHANNELS * 2)
-            self.gps = self.pool.submit(detect_gps, iq)
+            self.gps = self.pool.submit(detect_gps, iq.copy())
         if self.gps is not None and self.gps.done():
             event = self.gps.result()
             if event:
@@ -131,23 +129,64 @@ class Detector:
         return {"time_s": seconds, "events": self.events}, rgb
 
 
-def run(input_file, output_file):
-    with ThreadPoolExecutor(max_workers=1) as pool:
-        while packet := input_file.read(PACKET_BYTES):
-            if len(packet) != PACKET_BYTES:
-                raise ValueError("incomplete replay packet")
-            if PACKET.unpack_from(packet)[0] == 0:
-                detector = Detector(pool)
-            report, rgb = detector.feed(packet)
-            report = json.dumps(report).encode()
-            output_file.write(struct.pack("<I", len(report)))
-            output_file.write(report)
-            output_file.write(rgb.astype("<f4", copy=False).tobytes())
-            output_file.flush()
+def compute(ctx):
+    global due, detector, published
+    now = time.monotonic()
+    if due is not None and now < due:
+        return YIELD(due - now)
+    data = memoryview(ctx.inputs[0]).cast("B")
+    start, count, dt, _ = PACKET.unpack_from(data)
+    if start == 0:
+        detector = Detector(pool)
+        published = 0
+    due = now + count * dt
+    if count < ROWS:
+        due += 4
+    report, rgb = detector.feed(data)
+    ctx.outputs[0][...] = rgb
+    events = report["events"]
+    ctx.env["live"] = {"time_s": report["time_s"], "count": len(events), "events": events}
+    if len(events) != published:
+        published = len(events)
+        path.write_text(json.dumps(report, indent=2))
+        print(json.dumps(report), flush=True)
+
+
+def cleanup():
+    pool.shutdown(wait=False, cancel_futures=True)
 
 
 def graph(data, result):
-    worker = [sys.executable, str(Path(__file__).resolve()), "worker"]
+    prelude = f"""import json
+import struct
+import time
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import asdict
+from pathlib import Path
+
+import numpy as np
+from scipy.ndimage import uniform_filter1d
+from seti_rf.signal import rfi
+
+ROWS = {ROWS}
+CHANNELS = {CHANNELS}
+HEIGHT = {HEIGHT}
+WIDTH = {WIDTH}
+GPS_RATE = {GPS_RATE}
+GPS_CENTER_HZ = 1_575_420_000
+DM = {DM}
+PACKET = struct.Struct({PACKET.format!r})
+
+pool = ThreadPoolExecutor(max_workers=1)
+detector = None
+due = None
+published = 0
+path = Path({str(result.resolve())!r})
+"""
+    code = "\n\n".join([prelude, *(inspect.getsource(item) for item in
+                                   (detect_gps, Detector, compute, cleanup))])
+    code = indent(code.rstrip(), " " * 8)
     return f"""version: 2
 title: ATA and GPS | real-time replay
 graph:
@@ -175,53 +214,7 @@ graph:
     provider: generic
     config:
       code: |-
-        import json
-        import os
-        from pathlib import Path
-        import struct
-        import subprocess
-        import time
-
-        worker = None
-        due = None
-        path = Path({str(result.resolve())!r})
-        published = 0
-
-        def compute(ctx):
-            global due, worker, published
-            now = time.monotonic()
-            if due is not None and now < due:
-                return YIELD(due - now)
-            if worker is None:
-                env = os.environ.copy()
-                source_path = {os.environ.get("PYTHONPATH")!r}
-                if source_path:
-                    env["PYTHONPATH"] = source_path
-                worker = subprocess.Popen({worker!r}, env=env, stdin=subprocess.PIPE,
-                                          stdout=subprocess.PIPE)
-            data = memoryview(ctx.inputs[0]).cast("B")
-            start, count, dt, _ = struct.unpack_from("<IIdd", data)
-            if start == 0:
-                published = 0
-            due = now + count * dt
-            if count < {ROWS}:
-                due += 4
-            worker.stdin.write(data)
-            worker.stdin.flush()
-            length, = struct.unpack("<I", worker.stdout.read(4))
-            report = json.loads(worker.stdout.read(length))
-            memoryview(ctx.outputs[0]).cast("B")[:] = worker.stdout.read({PIXELS * 4})
-            events = report["events"]
-            ctx.env["live"] = {{"time_s": report["time_s"], "count": len(events),
-                               "events": events}}
-            if len(events) != published:
-                published = len(events)
-                path.write_text(json.dumps(report, indent=2))
-                print(json.dumps(report), flush=True)
-
-        def cleanup():
-            if worker is not None and worker.poll() is None:
-                worker.terminate()
+{code}
       inputCount: 1
       outputCount: 1
       outputTensorSpecs:
@@ -288,14 +281,11 @@ def main():
     generator = sub.add_parser("graph")
     for arg in ("data", "result", "output"):
         generator.add_argument(arg, type=Path)
-    sub.add_parser("worker")
     args = parser.parse_args()
     if args.command == "build":
         build(args.source, args.output)
-    elif args.command == "graph":
-        args.output.write_text(graph(args.data, args.result))
     else:
-        run(sys.stdin.buffer, sys.stdout.buffer)
+        args.output.write_text(graph(args.data, args.result))
 
 
 if __name__ == "__main__":
