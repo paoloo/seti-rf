@@ -9,7 +9,9 @@ a four-second hold at the end.
 
 ## Recorded demo
 
-![](./output-small.mp4)
+[![CyberEther replay showing the ATA waterfall and detection table](./demo.gif)](./output-small.mp4)
+
+Select the animation to open the full-resolution MP4.
 
 ## Run on macOS
 
@@ -48,5 +50,6 @@ because the data and report paths are absolute.
 | `live.cf32` | Local 40 MiB replay fixture carrying ATA filterbank power and GPS IQ in fixed packets. CyberEther uses CF32 as the transport for those packets. Ordinary raw CF32 IQ uses a different layout. |
 | `inline.json` | Generated snapshot of the current cycle's detections. Each detection updates the snapshot, and the next cycle replaces it when its first detection arrives. |
 | [`output-small.mp4`](./output-small.mp4) | Screen recording of the demo. |
+| [`demo.gif`](./demo.gif) | Animated preview of the recording, 10 fps at 960 px, for inline display on GitHub. |
 
 Git ignores the local replay fixture and generated JSON report.
