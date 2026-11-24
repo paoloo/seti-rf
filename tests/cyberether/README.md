@@ -9,11 +9,7 @@ a four-second hold at the end.
 
 ## Recorded demo
 
-<video src="./output-small.mp4" controls preload="metadata" width="800">
-  <a href="./output-small.mp4">Watch the CyberEther replay</a>
-</video>
-
-[Open or download the MP4](./output-small.mp4)
+![](./output-small.mp4)
 
 ## Run on macOS
 
