@@ -72,3 +72,30 @@ Project code is released under the [MIT License](LICENSE). Third-party
 materials remain subject to their applicable terms.
 
 If you use this software in research, cite it using [CITATION.cff](CITATION.cff).
+
+## Recorded voltage replay
+
+`seti_rf.triage.VoltageHistory` retains bounded complex-voltage chunks
+for one observation, beam, tuning, and polarization. Candidate lookup uses
+half-open sample intervals on the same observation clock. Requests include
+an RF range, which is checked against the signed tuning. A successful
+lookup returns the full-band voltages over the requested time interval
+and the signed baseband endpoints for the requested RF range.
+
+Run an offline replay with an installed copy of the package:
+
+```sh
+python tools/voltage_replay.py path/to/manifest.json > evidence.jsonl
+```
+
+The manifest contains a `stream` object matching `VoltageStream`, an
+integer `capacity_samples`, and an `events` array in arrival order. A
+chunk event has `type: "chunk"`, `path` (little-endian CF32, relative
+to the manifest), `first_sample`, `sample_count`, and optional
+`file_sample` (zero-based source offset). A candidate event has
+`type: "candidate"`, `id`, `first_sample`, `stop_sample`, `low_hz`,
+and `high_hz`. It may override stream fields in a `stream` object
+and select the `gps_l1_ca` probe with `probe`.
+
+The output contributes one JSON record per candidate, including the
+original candidate record, lookup status, and any probe result or error.
