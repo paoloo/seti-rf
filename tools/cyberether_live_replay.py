@@ -11,6 +11,7 @@ import numpy as np
 from scipy.ndimage import uniform_filter1d
 
 from cyberether_replay import GPS_RATE, HEADER, MAGIC, detect_gps
+from seti_rf.cyberether import ScrollingWaterfall
 
 ROWS = 100
 CHANNELS = 1344
@@ -21,6 +22,9 @@ PACKET = struct.Struct("<IIdd")
 PACKET_BYTES = PACKET.size + ROWS * CHANNELS * 2 + GPS_BYTES
 BATCH = PACKET_BYTES // 8
 DM = 219.81
+LINE = 10
+GPS_HALF_MHZ = 1.023
+SWEEP_SEGMENTS = 8
 
 
 def build(source, output):
@@ -41,6 +45,15 @@ def build(source, output):
             file.write(replay["gps"].tobytes() if start == 0 else bytes(GPS_BYTES))
 
 
+def sweep_regions(arrival, rf, delays, width):
+    """Cover a dispersed sweep with one region per sub-band, highest frequency first."""
+    regions = []
+    for band in np.array_split(np.arange(len(rf)), SWEEP_SEGMENTS):
+        regions.append([float(arrival + delays[band[0]]), float(arrival + delays[band[-1]] + width),
+                        float(rf[band[-1]]) - .25, float(rf[band[0]]) + .25])
+    return regions
+
+
 class Detector:
     def __init__(self, pool):
         self.pool = pool
@@ -52,38 +65,59 @@ class Detector:
         self.scores = np.empty(0)
         self.profile_start = 0
         self.baseline = None
+        self.waterfall = None
+        self.image_end_s = 0.0
+        self.gps_s = 0.0
 
     def feed(self, packet):
         start, count, dt, first_rf = PACKET.unpack_from(packet)
         rf = first_rf - .5 * np.arange(CHANNELS)
+        if self.waterfall is None:
+            # Columns pair adjacent 0.5 MHz channels and run from low to high frequency.
+            self.waterfall = ScrollingWaterfall(HEIGHT, WIDTH, LINE * dt,
+                                                float(rf[-1]) - .25, float(rf[0]) + .25)
         data = np.frombuffer(packet, dtype="<u2", count=count * CHANNELS,
                              offset=PACKET.size).reshape(count, CHANNELS)
         if start == 0:
             iq = np.frombuffer(packet, dtype="<i2", offset=PACKET.size + ROWS * CHANNELS * 2)
+            self.gps_s = len(iq) / 2 / GPS_RATE
             self.gps = self.pool.submit(detect_gps, iq.copy())
         if self.gps is not None and self.gps.done():
             event = self.gps.result()
             if event:
+                center = event["center_hz"] / 1e6
+                event["regions"] = [[event["time_s"], event["time_s"] + self.gps_s,
+                                     center - GPS_HALF_MHZ, center + GPS_HALF_MHZ]]
                 self.events.append(event)
             self.gps = None
 
         # One waterfall line per 10.24 ms of input, with newest lines at the bottom.
-        rows = len(data) // 10
+        rows = len(data) // LINE
         if rows:
-            power = data[:rows * 10].reshape(rows, 10, WIDTH, 2).max(axis=(1, 3))
+            power = data[:rows * LINE].reshape(rows, LINE, WIDTH, 2).max(axis=(1, 3))
             reference = np.maximum(np.median(power, axis=1, keepdims=True), 1)
             db = 10 * np.log10(np.maximum(power, 1) / reference)
             self.image[:-rows] = self.image[rows:]
             self.image[-rows:] = np.clip((db + .8) / 4, 0, 1)[:, ::-1]
+            self.image_end_s = (start + rows * LINE) * dt
 
         medians = np.maximum(np.median(data, axis=1), 1)
         peaks = data.argmax(axis=1)
         active = np.flatnonzero(data[np.arange(count), peaks] >= medians * 10**.8)
-        if len(active) >= 20 and len(np.unique(peaks[active])) <= 8:
-            if not any(event["kind"] == "pulsed_drifting_carrier" for event in self.events):
+        carrier = next((event for event in self.events if event["kind"] == "pulsed_drifting_carrier"), None)
+        if len(active) and len(np.unique(peaks[active])) <= 8:
+            first_s, stop_s = (start + int(active[0])) * dt, (start + int(active[-1]) + 1) * dt
+            low, high = float(rf[peaks[active]].min()) - .25, float(rf[peaks[active]].max()) + .25
+            if carrier is None and len(active) >= 20:
                 self.events.append({"kind": "pulsed_drifting_carrier", "classification": "human_made",
-                                    "time_s": (start + int(active[0])) * dt,
-                                    "rf_mhz": float(rf[peaks[active[0]]])})
+                                    "time_s": first_s, "rf_mhz": float(rf[peaks[active[0]]]),
+                                    "regions": [[first_s, stop_s, low, high]]})
+            elif carrier is not None and len(active) >= 5:
+                # Grow the region while the same carrier stays on, so the box covers its drift.
+                region = carrier["regions"][-1]
+                if first_s - region[1] <= .2 and low - 5 <= region[3] and high + 5 >= region[2]:
+                    region[1] = max(region[1], stop_s)
+                    region[2], region[3] = min(region[2], low), max(region[3], high)
 
         if self.baseline is None:
             self.raw = np.concatenate((self.raw, data))
@@ -112,9 +146,10 @@ class Detector:
                 scale = 1.4826 * np.median(np.abs(reference - median))
                 peak = int(scores.argmax())
                 if scale > 0 and (scores[peak] - median) / scale >= 6:
+                    arrival = (self.profile_start + first + peak) * dt
                     self.events.append({"kind": "dispersed_pulse", "classification": "unknown",
-                                        "time_s": (self.profile_start + first + peak) * dt,
-                                        "dm_pc_cm3": DM})
+                                        "time_s": arrival, "dm_pc_cm3": DM,
+                                        "regions": sweep_regions(arrival, rf, delays * dt, width * dt)})
             self.scores = np.concatenate((self.scores, scores))[-4000:]
             trim = stop - half
             self.history = self.history[trim:]
@@ -128,6 +163,9 @@ class Detector:
                         np.clip(value * 2.4, 0, .95)), axis=-1)
         return {"time_s": seconds, "events": self.events}, rgb
 
+    def boxes(self):
+        return self.waterfall.boxes(self.image_end_s, self.events)
+
 
 def compute(ctx):
     global due, detector, published
@@ -138,16 +176,19 @@ def compute(ctx):
     start, count, dt, _ = PACKET.unpack_from(data)
     if start == 0:
         detector = Detector(pool)
-        published = 0
+        published = None
     due = now + count * dt
     if count < ROWS:
         due += 4
     report, rgb = detector.feed(data)
     ctx.outputs[0][...] = rgb
+    # The Frame block draws these boxes over the waterfall.
+    ctx.output_attrs[0]["boxes"] = detector.boxes()
     events = report["events"]
     ctx.env["live"] = {"time_s": report["time_s"], "count": len(events), "events": events}
-    if len(events) != published:
-        published = len(events)
+    snapshot = json.dumps(events)
+    if snapshot != published:
+        published = snapshot
         path.write_text(json.dumps(report, indent=2))
         print(json.dumps(report), flush=True)
 
@@ -167,6 +208,7 @@ from pathlib import Path
 
 import numpy as np
 from scipy.ndimage import uniform_filter1d
+from seti_rf.cyberether import ScrollingWaterfall
 from seti_rf.signal import rfi
 
 ROWS = {ROWS}
@@ -176,16 +218,19 @@ WIDTH = {WIDTH}
 GPS_RATE = {GPS_RATE}
 GPS_CENTER_HZ = 1_575_420_000
 DM = {DM}
+LINE = {LINE}
+GPS_HALF_MHZ = {GPS_HALF_MHZ}
+SWEEP_SEGMENTS = {SWEEP_SEGMENTS}
 PACKET = struct.Struct({PACKET.format!r})
 
 pool = ThreadPoolExecutor(max_workers=1)
 detector = None
 due = None
-published = 0
+published = None
 path = Path({str(result.resolve())!r})
 """
     code = "\n\n".join([prelude, *(inspect.getsource(item) for item in
-                                   (detect_gps, Detector, compute, cleanup))])
+                                   (detect_gps, sweep_regions, Detector, compute, cleanup))])
     code = indent(code.rstrip(), " " * 8)
     return f"""version: 2
 title: ATA and GPS | real-time replay

@@ -4,7 +4,12 @@ The Python block imports the installed `seti-rf` package and processes
 the replay as it arrives. CyberEther shows a scrolling ATA waterfall and
 a detection table. The demo reports GPS L1 C/A from recorded IQ, a
 dispersed ATA pulse at the supplied DM of 219.81 pc cm⁻³, and a synthetic
-pulsed drifting carrier. Playback loops about every 14 seconds, including
+pulsed drifting carrier. Each detection is boxed on the waterfall where
+it appears: the Python block sets the output tensor's `boxes` attribute
+with `seti_rf.cyberether.ScrollingWaterfall`, and the Frame block draws
+the boxes as the waterfall scrolls. The dispersed pulse is traced by one
+box per sub-band along its sweep. Boxes need a CyberEther build whose
+Frame block supports the `boxes` attribute. Playback loops about every 14 seconds, including
 a four-second hold at the end.
 
 ## Recorded demo
